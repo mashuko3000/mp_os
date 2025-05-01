@@ -4,77 +4,303 @@
 
 allocator_sorted_list::~allocator_sorted_list()
 {
-    throw not_implemented("allocator_sorted_list::~allocator_sorted_list()", "your code should be here...");
+    deallocate_with_guard(_trusted_memory);
 }
 
 allocator_sorted_list::allocator_sorted_list(
-    allocator_sorted_list const &other)
+        allocator_sorted_list &&other) noexcept:
+        _trusted_memory(other._trusted_memory)
 {
-    throw not_implemented("allocator_sorted_list::allocator_sorted_list(allocator_sorted_list const &)", "your code should be here...");
+    other._trusted_memory = nullptr;
 }
 
 allocator_sorted_list &allocator_sorted_list::operator=(
-    allocator_sorted_list const &other)
+        allocator_sorted_list &&other) noexcept
 {
-    throw not_implemented("allocator_sorted_list &allocator_sorted_list::operator=(allocator_sorted_list const &)", "your code should be here...");
+    if (this == &other)
+    {
+        return *this;
+    }
+
+    deallocate_with_guard(_trusted_memory);
+    _trusted_memory = other._trusted_memory;
+    other._trusted_memory = nullptr;
+
+    return *this;
 }
 
 allocator_sorted_list::allocator_sorted_list(
-    allocator_sorted_list &&other) noexcept
+        size_t space_size,
+        allocator *parent_allocator,
+        //logger *logger,
+        allocator_with_fit_mode::fit_mode allocate_fit_mode)
 {
-    throw not_implemented("allocator_sorted_list::allocator_sorted_list(allocator_sorted_list &&) noexcept", "your code should be here...");
-}
+    auto const target_size = get_metadata_size() + space_size;
 
-allocator_sorted_list &allocator_sorted_list::operator=(
-    allocator_sorted_list &&other) noexcept
-{
-    throw not_implemented("allocator_sorted_list &allocator_sorted_list::operator=(allocator_sorted_list &&) noexcept", "your code should be here...");
-}
+    try
+    {
+        _trusted_memory = parent_allocator == nullptr
+                          ? ::operator new(target_size)
+                          : parent_allocator->allocate(target_size, 1);
+    }
+    catch (std::bad_alloc const &ex)
+    {
+        // TODO: logs
+        throw;
+    }
 
-allocator_sorted_list::allocator_sorted_list(
-    size_t space_size,
-    allocator *parent_allocator,
-    logger *logger,
-    allocator_with_fit_mode::fit_mode allocate_fit_mode)
-{
-    throw not_implemented("allocator_sorted_list::allocator_sorted_list(size_t, allocator *, logger *, allocator_with_fit_mode::fit_mode)", "your code should be here...");
+    get_memory_size() = space_size;
+    get_parent_allocator() = parent_allocator;
+    get_fit_mode() = allocate_fit_mode;
+    // new (get_sync_object_ptr()) std::mutex;
+    allocator::construct(get_sync_object_ptr());
+    get_first_block_address() = &get_first_block_address() + 1;
+
+    get_block_size(get_first_block_address()) = space_size - get_available_block_meta_size();
+    get_next_available_block(get_first_block_address()) = nullptr;
 }
 
 [[nodiscard]] void *allocator_sorted_list::allocate(
-    size_t value_size,
-    size_t values_count)
+        size_t value_size,
+        size_t values_count)
 {
-    throw not_implemented("[[nodiscard]] void *allocator_sorted_list::allocate(size_t, size_t)", "your code should be here...");
+    auto requested_size = value_size * values_count;
+
+    void *target_previous_block = nullptr;
+    void *target_current_block = nullptr;
+
+    {
+        void *previous_block = nullptr;
+        void *current_block = get_first_block_address();
+        auto fit_mode = get_fit_mode();
+
+        while (current_block != nullptr)
+        {
+            if (requested_size <= get_block_size(current_block) &&
+                (fit_mode == allocator_with_fit_mode::fit_mode::first_fit ||
+                 (fit_mode == allocator_with_fit_mode::fit_mode::the_best_fit && (target_current_block == nullptr ||
+                                                                                  get_block_size(target_current_block) > get_block_size(current_block))) ||
+                 (fit_mode == allocator_with_fit_mode::fit_mode::the_worst_fit && (target_current_block == nullptr ||
+                                                                                   get_block_size(target_current_block) < get_block_size(current_block)))))
+            {
+                target_previous_block = previous_block;
+                target_current_block = current_block;
+
+                if (fit_mode == allocator_with_fit_mode::fit_mode::first_fit)
+                {
+                    break;
+                }
+            }
+
+            previous_block = current_block;
+            current_block = get_next_available_block(current_block);
+        }
+    }
+
+    if (target_current_block == nullptr)
+    {
+        // TODO: logs
+        throw std::bad_alloc();
+    }
+
+    void *new_avail_block;
+    auto block_remaining = get_block_size(target_current_block) - requested_size;
+
+    if (block_remaining < get_available_block_meta_size())
+    {
+        requested_size += block_remaining;
+        // requested_size = get_block_size(target_current_block);
+        // TODO: logs
+
+        (target_previous_block == nullptr
+         ? get_first_block_address()
+         : get_next_available_block(target_previous_block)) = get_next_available_block(target_current_block);
+    }
+    else
+    {
+        new_avail_block = (reinterpret_cast<unsigned char *>(target_current_block) + (get_block_size(target_current_block) - block_remaining));
+
+        get_block_size(new_avail_block) = block_remaining;
+
+        get_next_available_block(new_avail_block) = get_next_available_block(target_current_block);
+
+        (target_previous_block == nullptr
+         ? get_first_block_address()
+         : get_next_available_block(target_previous_block)) = new_avail_block;
+    }
+
+    get_block_size(target_current_block) = requested_size;
+    get_trusted_memory(target_current_block) = _trusted_memory;
+
+    return reinterpret_cast<void *>(reinterpret_cast<unsigned char *>(target_current_block) + get_ancillary_block_meta_size());
 }
 
 void allocator_sorted_list::deallocate(
-    void *at)
+        void *at)
 {
-    throw not_implemented("void allocator_sorted_list::deallocate(void *)", "your code should be here...");
+    if (at == nullptr){
+        throw std::logic_error("pointer is null, cant deallocate memory by this pointer");
+    }
+
+    void* target_block = reinterpret_cast<void*>(
+            reinterpret_cast<unsigned char*>(at) - get_taken_block_metadata_size());
+
+    if (at < memory_start() || at > memory_end())
+    {
+        throw std::logic_error("pointer out of range");
+    }
+
+
+    if (get_trusted_memory(at = reinterpret_cast<void *>(reinterpret_cast<unsigned char *>(at) - get_ancillary_block_meta_size())) != _trusted_memory)
+    {
+        throw std::logic_error("block to deallocate is not registered inside allocator instance");
+    }
+
+    void* next_block = get_first_block_address();
+    void* previous_block = nullptr;
+
+    while (next_block != nullptr && next_block < target_block)
+    {
+        previous_block = next_block;
+        next_block = get_next_available_block(next_block);
+    }
+
+    set_free_block_for_deallocated_taken_block(target_block, next_block);
+
+    if (previous_block == nullptr){
+        set_free_next_block_for_meta_data(target_block);
+    } else{
+        set_free_block_for_deallocated_taken_block(previous_block, target_block);
+    }
+
+    if (next_block != nullptr && next_block == reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(target_block) + get_block_size(target_block) + get_taken_block_metadata_size()))
+    {
+        *reinterpret_cast<size_t*>(target_block) += get_block_size(next_block) + get_available_block_meta_size();
+        set_free_block_for_deallocated_taken_block(target_block, get_next_available_block(next_block));
+    }
+
+    if (previous_block != nullptr && target_block == reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(previous_block) + get_block_size(previous_block) + get_taken_block_metadata_size()))
+    {
+        *reinterpret_cast<size_t*>(previous_block) += (get_block_size(target_block) + get_taken_block_metadata_size());
+        set_free_block_for_deallocated_taken_block(previous_block, get_next_available_block_for_taken_block(target_block));
+    }
 }
 
 inline void allocator_sorted_list::set_fit_mode(
-    allocator_with_fit_mode::fit_mode mode)
+        allocator_with_fit_mode::fit_mode mode)
 {
-    throw not_implemented("inline void allocator_sorted_list::set_fit_mode(allocator_with_fit_mode::fit_mode)", "your code should be here...");
+    get_fit_mode() = mode;
 }
 
 inline allocator *allocator_sorted_list::get_allocator() const
 {
-    throw not_implemented("inline allocator *allocator_sorted_list::get_allocator() const", "your code should be here...");
+    return get_parent_allocator();
 }
 
-std::vector<allocator_test_utils::block_info> allocator_sorted_list::get_blocks_info() const noexcept
+inline constexpr size_t allocator_sorted_list::get_metadata_size() noexcept
 {
-    throw not_implemented("std::vector<allocator_test_utils::block_info> allocator_sorted_list::get_blocks_info() const noexcept", "your code should be here...");
+    return sizeof(size_t) + sizeof(allocator *) + sizeof(allocator_with_fit_mode::fit_mode) + sizeof(std::mutex) + sizeof(void *);
 }
 
-inline logger *allocator_sorted_list::get_logger() const
+inline size_t &allocator_sorted_list::get_memory_size() const
 {
-    throw not_implemented("inline logger *allocator_sorted_list::get_logger() const", "your code should be here...");
+    return *reinterpret_cast<size_t *>(_trusted_memory);
 }
 
-inline std::string allocator_sorted_list::get_typename() const noexcept
+inline allocator *&allocator_sorted_list::get_parent_allocator() const
 {
-    throw not_implemented("inline std::string allocator_sorted_list::get_typename() const noexcept", "your code should be here...");
+    return *reinterpret_cast<allocator **>(&get_memory_size() + 1);
 }
+
+inline allocator_with_fit_mode::fit_mode &allocator_sorted_list::get_fit_mode() const
+{
+    return *reinterpret_cast<allocator_with_fit_mode::fit_mode*>(&get_parent_allocator() + 1);
+}
+
+inline std::mutex *allocator_sorted_list::get_sync_object_ptr() const
+{
+    return reinterpret_cast<std::mutex *>(&get_fit_mode() + 1);
+}
+
+inline std::mutex &allocator_sorted_list::get_sync_object() const
+{
+    return *get_sync_object_ptr();
+}
+
+inline void *&allocator_sorted_list::get_first_block_address() const
+{
+    return *reinterpret_cast<void **>(get_sync_object_ptr() + 1);
+}
+
+inline constexpr size_t allocator_sorted_list::get_available_block_meta_size() noexcept
+{
+    return sizeof(size_t) + sizeof(void *);
+}
+
+inline constexpr size_t allocator_sorted_list::get_ancillary_block_meta_size() noexcept
+{
+    return get_available_block_meta_size();
+}
+
+inline size_t &allocator_sorted_list::get_block_size(
+        void *block)
+{
+    return *reinterpret_cast<size_t *>(block);
+}
+
+inline void *&allocator_sorted_list::get_next_available_block(
+        void *available_block)
+{
+    return *reinterpret_cast<void **>(&get_block_size(available_block) + 1);
+}
+
+inline void *allocator_sorted_list::get_next_available_block_for_taken_block(
+        void *available_block)
+{
+    return *reinterpret_cast<void**>(
+            reinterpret_cast<unsigned char*>(available_block)
+            + sizeof(size_t)
+            + sizeof(void*));
+}
+
+inline void *&allocator_sorted_list::get_trusted_memory(
+        void *ancillary_block)
+{
+    return get_next_available_block(ancillary_block);
+}
+
+inline size_t allocator_sorted_list::get_taken_block_metadata_size() const
+{
+    return sizeof(size_t) + sizeof(void*) * 2; //размер блока, начало памяти, указатель на след свободный
+}
+
+inline void* allocator_sorted_list::get_free_block_from_taken_block(void* free_block) const
+{
+    return *reinterpret_cast<void**>(
+            reinterpret_cast<unsigned char*>(free_block)
+            + sizeof(size_t)
+            + sizeof(void*));
+}
+
+inline void allocator_sorted_list::set_free_block_for_deallocated_taken_block(void *target_block,
+                                                                                   void *next_block){
+    *reinterpret_cast<void**>(
+            reinterpret_cast<unsigned char*>(target_block)
+            + sizeof(size_t)
+            + sizeof(void*)) = next_block;
+}
+
+inline void allocator_sorted_list::set_free_next_block_for_meta_data(void* target_block){
+    *reinterpret_cast<void**>(get_first_block_address()) = target_block;
+}
+
+void* allocator_sorted_list::memory_start() const
+{
+    return reinterpret_cast<unsigned char*>(_trusted_memory) + get_metadata_size();
+}
+
+void* allocator_sorted_list::memory_end() const
+{
+    return reinterpret_cast<unsigned char*>(memory_start()) + get_memory_size();
+}
+
