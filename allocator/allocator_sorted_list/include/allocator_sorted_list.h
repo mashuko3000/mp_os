@@ -7,72 +7,109 @@
 #include <logger_guardant.h>
 #include <typename_holder.h>
 
+#include <iostream>
+#include <mutex>
+
+#include "allocator.h"
+#include "allocator_guardant.h"
+#include "allocator_with_fit_mode.h"
+
 class allocator_sorted_list final:
-    private allocator_guardant,
-    public allocator_test_utils,
-    public allocator_with_fit_mode,
-    private logger_guardant,
-    private typename_holder
+        private allocator_guardant,
+        public allocator_with_fit_mode
 {
 
 private:
-    
+
     void *_trusted_memory;
 
 public:
-    
+
     ~allocator_sorted_list() override;
-    
+
     allocator_sorted_list(
-        allocator_sorted_list const &other);
-    
+            allocator_sorted_list const &other) = delete;
+
     allocator_sorted_list &operator=(
-        allocator_sorted_list const &other);
-    
+            allocator_sorted_list const &other) = delete;
+
     allocator_sorted_list(
-        allocator_sorted_list &&other) noexcept;
-    
+            allocator_sorted_list &&other) noexcept;
+
     allocator_sorted_list &operator=(
-        allocator_sorted_list &&other) noexcept;
+            allocator_sorted_list &&other) noexcept;
 
 public:
-    
+
     explicit allocator_sorted_list(
-        size_t space_size,
-        allocator *parent_allocator = nullptr,
-        logger *logger = nullptr,
-        allocator_with_fit_mode::fit_mode allocate_fit_mode = allocator_with_fit_mode::fit_mode::first_fit);
+            size_t space_size,
+            allocator *parent_allocator = nullptr,
+            //logger *logger = nullptr,
+            allocator_with_fit_mode::fit_mode allocate_fit_mode = allocator_with_fit_mode::fit_mode::first_fit);
 
 public:
-    
+
     [[nodiscard]] void *allocate(
-        size_t value_size,
-        size_t values_count) override;
-    
+            size_t value_size,
+            size_t values_count) override;
+
     void deallocate(
-        void *at) override;
+            void *at) override;
+
+    inline void set_free_block_for_deallocated_taken_block(void* target_block, void* next_block);
+    inline void set_free_next_block_for_meta_data(void* target_block);
 
 public:
-    
+
     inline void set_fit_mode(
-        allocator_with_fit_mode::fit_mode mode) override;
+            allocator_with_fit_mode::fit_mode mode) override;
 
 private:
-    
+
     inline allocator *get_allocator() const override;
 
-public:
-    
-    std::vector<allocator_test_utils::block_info> get_blocks_info() const noexcept override;
+private:
+
+    inline static constexpr size_t get_metadata_size() noexcept;
+
+    inline size_t &get_memory_size() const;
+
+    inline allocator *&get_parent_allocator() const;
+
+    inline allocator_with_fit_mode::fit_mode &get_fit_mode() const;
+
+    inline std::mutex *get_sync_object_ptr() const;
+
+    inline std::mutex &get_sync_object() const;
+
+    inline void *& get_first_block_address() const;
 
 private:
-    
-    inline logger *get_logger() const override;
 
-private:
-    
-    inline std::string get_typename() const noexcept override;
-    
+    inline static constexpr size_t get_available_block_meta_size() noexcept;
+
+    inline static constexpr size_t get_ancillary_block_meta_size() noexcept;
+
+    inline size_t &get_block_size(
+            void *block);
+
+    inline void *&get_next_available_block(
+            void *available_block);
+
+    inline void *&get_trusted_memory(
+            void *ancillary_block);
+
+    inline void *get_next_available_block_for_taken_block(
+            void *ancillary_block);
+
+    inline size_t get_taken_block_metadata_size() const;
+
+    inline void* get_free_block_from_taken_block(void* free_block) const;
+
+    void* memory_start() const;
+
+    void* memory_end() const;
+
 };
 
 #endif //MATH_PRACTICE_AND_OPERATING_SYSTEMS_ALLOCATOR_ALLOCATOR_SORTED_LIST_H
